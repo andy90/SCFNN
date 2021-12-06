@@ -20,7 +20,46 @@ singularity pull oneapi-hpckit_latest.sif docker://intel/oneapi-hpckit
 
 3. Download libtorch
 The SCFNN code utilizes libtorch to do the neural network related calculations. We need to download libtorch in order to compile SCFNN. The libtorch version we used is 1.9.0.
-wget 
-https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-1.9.0%2Bcpu.zip
  
+wget https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-1.9.0%2Bcpu.zip
+unzip libtorch-cxx11-abi-shared-with-deps-1.9.0%2Bcpu.zip 
+
+4. Compile the code
+I will take the Liquid Vapor interface simulation as an example to show you how to compile the code.
+First go to examples/LiquidVapor:
+cd examples/LiquidVapor
+
+Then at the 16th line of CMakeLists.txt, change /dssg/home/gaoang/libtorch to the directory where your install libtorch.
+
+Then go to demo/
+
+cd demo
+
+Then enter the singularity container:
+
+singularity shell -e /path-to-inte_oneapikit/oneapi-hpckit_latest.sif
+
+Then run the run_make.sh:
+./run_make.sh
+
+Now the compilation will begin. It might takes several minutes to compile the code, depending on your hardware. The compiled executable is named MD.
+
+Instructions for run SCFNN
+
+Still let's use the LiquidVapor interface as an example. Suppose you are still in the folder examples/LiquidVapor/demo, where you have just compiled the SCFNN. 
+
+First, you need to enter the singularity container again:
+
+singularity shell -e /path-to-inte_oneapikit/oneapi-hpckit_latest.sif
+
+Now run the code with
+./run.sh
+
+run.sh contains parameters such as simulation steps, timestep, thermostat ect. One can go to the main_final_twobath.cpp. The first lines of in the main() function explains the parameters.
+
+Notice that the simulation requires Oxyz.txt, Hxyz.txt and box.txt as inputs. Oxyz.txt and Hxyz.txt contains the intial coordinates. The box.txt contains the box dimension.
+
+Sample output files can be found in demo/. Among the output files, the most important ones are xyz_hist.txt and wxyz_hist.txt, which are the trajectory files of the coordinates of the nuclues and the wannier centers respectively. 
+
+It may take several minutes to an hour to complete the demo simulation, depending on the hardware you have. Notice that the output you got might be different from the sample outputs provided. This is because random number generator is used in the code, thus each run will generate different results.
 Should you have any questions, please contact anggao@bupt.edu.cn
