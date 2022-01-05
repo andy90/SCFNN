@@ -17,8 +17,7 @@
 #define natoms 3000
 #define noxygen 1000
 #define nhydrogen 2000
-#define nkmax 4
-#define kdim 1126
+
 
 using namespace std;
 using namespace torch::indexing;
@@ -26,12 +25,15 @@ using namespace torch::indexing;
 void initialize(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<float> &boxlength, float temperature, float massO, float massH);
 void resume(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<float> &boxlength, float temperature, float massO, float massH);
 void update(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<vector<float> > &force, float massO, float massH, float dt);
+void updatepos(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<vector<float> > &force, float massO, float massH, float dt);
+void updatevelocity_acc(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<vector<float> > &force, float massO, float massH, float dt);
+
 void compute_force_GT(float rij[][natoms], float vecrij[][natoms][3], vector<vector<float> > &force, float massO, float massH, vector<vector<float> > &parameters2_OO, vector<vector<float> > &parameters2_OH, vector<vector<float> > &parameters2_HO, vector<vector<float> > &parameters2_HH, vector<vector<float> > &parameters4_OOO, vector<vector<float> > &parameters4_OOH, vector<vector<float> > &parameters4_OHH, vector<vector<float> > &parameters4_HHO, vector<vector<float> > &parameters4_HOO, float xOscaling[][3], float xHscaling[][3], torch::jit::script::Module &net);
 void vel_scale(vector<vector<float> > &pos, float massO, float massH, float temperature, float tau1, float tau2, float dt);
 void pbc(vector<vector<float> > &pos, vector<float> &boxlength);
 void vel_pbc(vector<vector<float> > &pos, float massO, float massH);
 void print_data(vector<vector<float> > &pos, int istep, vector<float> &box, ofstream &ffile);
-void print_final(vector<vector<float> > &pos, vector<vector<float> > &vel);
+void print_final(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc);
 void printE(vector<vector<float> > & EO, vector<vector<float> > & EH, int istep, int iter, ofstream &ff);
 void print_general(vector<vector<float> > & wxyz, int istep, int iter, ofstream &ff);
 
@@ -149,7 +151,7 @@ int main(int argc,char *argv[]) {
     
     int istep;
     int step_rescale = 1;
-    int step_print = 20;
+    int step_print = 100;
 
     
 
@@ -267,12 +269,10 @@ int main(int argc,char *argv[]) {
             }
             
         }
-        else
-        {
-            update(pos, vel, acc, force, massO, massH, dt);
-            pbc(pos, boxlength);
-            vel_pbc(vel, massO, massH);
-        }
+
+        updatepos(pos, vel, acc, force, massO, massH, dt); // update the position of the verlocity verlet
+        pbc(pos, boxlength);
+        
         
         get_dist(rij, vecrij, pos, boxlength); // get the distance and vector dist
         // generate rotamers and rotate the position of the nucleus
@@ -426,6 +426,9 @@ int main(int argc,char *argv[]) {
             }
         }
         
+        updatevelocity_acc(pos, vel, acc, force, massO, massH, dt); // update the velocity and accelaration 
+        vel_pbc(vel, massO, massH);
+
         if (istep % step_rescale == 0){
             vel_scale(vel, massO, massH, temperature, tau1, tau2, dt);
         }
@@ -467,11 +470,11 @@ int main(int argc,char *argv[]) {
 
         if (istep % step_print == 0){
             print_data(pos, istep, boxlength, fpos);
-            print_data(vel, istep, boxlength, fvel);
-            print_data(force, istep, boxlength, fforce);
-            print_final(pos, vel);
-            printE(EO, EH, istep, iter, fEfield);
-            printE(fO_peturb_backrotate, fH_peturb_backrotate, istep, iter, ffpeturb);
+            //print_data(vel, istep, boxlength, fvel);
+            //print_data(force, istep, boxlength, fforce);
+            print_final(pos, vel, acc);
+            //printE(EO, EH, istep, iter, fEfield);
+            //printE(fO_peturb_backrotate, fH_peturb_backrotate, istep, iter, ffpeturb);
             print_general(wxyz, istep, iter, fwxyz);
         }
     }
@@ -542,9 +545,10 @@ void initialize(vector<vector<float> > &pos, vector<vector<float> > &vel, vector
 
 void resume(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<float> &boxlength, float temperature, float massO, float massH){
     // initialize the position, velocity and acceleration of the atoms
-    ifstream fOxyz("Oxyz_final.txt"); // read in the xyz coordinates of the oxygen first
-    ifstream fHxyz("Hxyz_final.txt"); // read in the xyz coordinates of the hydrogen next
-    ifstream fvxyz("vxyz_final.txt");
+    ifstream fOxyz("Oxyz.txt"); // read in the xyz coordinates of the oxygen first
+    ifstream fHxyz("Hxyz.txt"); // read in the xyz coordinates of the hydrogen next
+    ifstream fvxyz("vxyz.txt"); // read in velocity
+    ifstream faxyz("axyz.txt"); // read in accelaration
 
     for (int i = 0; i < noxygen; i++)
     {
@@ -581,9 +585,10 @@ void resume(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vec
     {
         for (int j = 0; j < 3; j++)
         {
-            acc[i][j] = 0.0;
+            faxyz >> acc[i][j];
         }
     }
+    faxyz.close();
 }
 
 
@@ -608,6 +613,54 @@ void update(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vec
         for (int j = 0; j < 3; j++)
         {
             pos[i][j] += vel[i][j] * dt + 0.5 * acc[i][j] * dt * dt;
+            vel[i][j] += 0.5 * dt * (acc[i][j] + force[i][j] / massH);
+            acc[i][j] = force[i][j] / massH;
+        }
+    }
+}
+
+void updatepos(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<vector<float> > &force, float massO, float massH, float dt){
+    //    UPDATE updates positions, velocities and accelerations.
+    //    A velocity Verlet algorithm is used for the updating.
+    //
+    //    x(t+dt) = x(t) + v(t) * dt + 0.5 * a(t) * dt * dt
+    //    v(t+dt) = v(t) + 0.5 * ( a(t) + a(t+dt) ) * dt
+    //    a(t+dt) = f(t) / m
+    for (int i = 0; i < noxygen; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            pos[i][j] += vel[i][j] * dt + 0.5 * acc[i][j] * dt * dt;
+        }
+    }
+    for (int i = noxygen; i < natoms; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            pos[i][j] += vel[i][j] * dt + 0.5 * acc[i][j] * dt * dt;
+        }
+    }
+}
+
+void updatevelocity_acc(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc, vector<vector<float> > &force, float massO, float massH, float dt){
+    //    UPDATE updates positions, velocities and accelerations.
+    //    A velocity Verlet algorithm is used for the updating.
+    //
+    //    x(t+dt) = x(t) + v(t) * dt + 0.5 * a(t) * dt * dt
+    //    v(t+dt) = v(t) + 0.5 * ( a(t) + a(t+dt) ) * dt
+    //    a(t+dt) = f(t) / m
+    for (int i = 0; i < noxygen; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            vel[i][j] += 0.5 * dt * (acc[i][j] + force[i][j] / massO);
+            acc[i][j] = force[i][j] / massO;
+        }
+    }
+    for (int i = noxygen; i < natoms; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
             vel[i][j] += 0.5 * dt * (acc[i][j] + force[i][j] / massH);
             acc[i][j] = force[i][j] / massH;
         }
@@ -715,10 +768,11 @@ void print_data(vector<vector<float> > &pos, int istep, vector<float> &box, ofst
     }
 }
 
-void print_final(vector<vector<float> > &pos, vector<vector<float> > &vel){
+void print_final(vector<vector<float> > &pos, vector<vector<float> > &vel, vector<vector<float> > &acc){
     ofstream fO("Oxyz_final.txt");
     ofstream fH("Hxyz_final.txt");
     ofstream fv("vxyz_final.txt");
+    ofstream fa("axyz_final.txt");
 
     for (int i = 0; i < noxygen; i++)
     {
@@ -747,9 +801,19 @@ void print_final(vector<vector<float> > &pos, vector<vector<float> > &vel){
         fv << "\n";
     }
 
+    for (int i = 0; i < natoms; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            fa << acc[i][j] <<"  ";
+        }
+        fa << "\n";
+    }
+
     fO.close();
     fH.close();
     fv.close();
+    fa.close();
 }
 
 void compute_force_GT(float rij[][natoms], float vecrij[][natoms][3], vector<vector<float> > &force, float massO, float massH, vector<vector<float> > &parameters2_OO, vector<vector<float> > &parameters2_OH, vector<vector<float> > &parameters2_HO, vector<vector<float> > &parameters2_HH, vector<vector<float> > &parameters4_OOO, vector<vector<float> > &parameters4_OOH, vector<vector<float> > &parameters4_OHH, vector<vector<float> > &parameters4_HHO, vector<vector<float> > &parameters4_HOO, float xOscaling[][3], float xHscaling[][3], torch::jit::script::Module &net){
@@ -1511,12 +1575,17 @@ void get_Ewald(vector<vector<float> > &pos, vector<vector<float> > &w_pos, vecto
     float k0x = 2 * M_PI / boxlength[0];
     float k0y = 2 * M_PI / boxlength[1];
     float k0z = 2 * M_PI / boxlength[2];
+
+    int nkmaxx = 4;
+    int nkmaxy = 4;
+    int nkmaxz = 12;
+    int kdim = (2*nkmaxx - 1) * (2*nkmaxy - 1) * (2*nkmaxz - 1) - 1;
     
     vector<vector<float> > kxyz (kdim, vector<float>(3));
     int ik = 0;
-    for (int i = (- nkmax + 1); i < nkmax; i++){
-        for (int j = (- nkmax + 1); j < nkmax; j++){
-            for (int k = (- 3*nkmax + 1); k<(3*nkmax); k++){
+    for (int i = (- nkmaxx + 1); i < nkmaxx; i++){
+        for (int j = (- nkmaxy + 1); j < nkmaxy; j++){
+            for (int k = (- nkmaxz + 1); k< nkmaxz; k++){
                 if ((i != 0) | (j != 0) | (k != 0)){
                     kxyz[ik][0] = i * k0x;
                     kxyz[ik][1] = j * k0y;
